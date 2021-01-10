@@ -655,8 +655,8 @@ d7$Fitted2 <- fitted(IV2SLS2)
 #### Running second stage of the 2SLS
 
 ```{r}
-Regression3 <- lm(data = d7, CasePerTest ~ Fitted2 + stringency_index + Under_30 + PercentageForeignersIkke + PercentageForeigners_vest + Retail_Change_lag + Transit_Change_lag + Grocery_Change_lag + Befolkningstæthed + Residential_Change_lag, REML = F, control = lmerControl(optimizer = "nloptwrap", calc.derivs = FALSE), na.action = na.exclude)
-Summary(Regression3)
+Regression <- lmer(data = d7, CasePerTest ~ Fitted2 + stringency_index + Under_30 + PercentageForeignersIkke + PercentageForeigners_vest + Retail_Change_lag + Transit_Change_lag + Grocery_Change_lag + Befolkningstæthed + Residential_Change_lag + (1 | Kommune ) + (1 | CountDate), REML = F, control = lmerControl(optimizer = "nloptwrap", calc.derivs = FALSE), na.action = na.exclude)
+Summary(Regression)
 ```
 
 #### Running regression without fixed effects
@@ -668,8 +668,8 @@ Regression1 <- lm(data = d7, CasePerTest ~ stringency_index + Under_30 + Percent
 #### Testing for poolability
 
 ```{r}
-RSS_R <- sum(regression3$residuals^2)
-RSS_U <- sum(regression$residuals^2)
+RSS_R <- sum(Regression$residuals^2)
+RSS_U <- sum(Regression$residuals^2)
 
 DOFF1 <- 98+181-2
 DOFF2 <- 17839
