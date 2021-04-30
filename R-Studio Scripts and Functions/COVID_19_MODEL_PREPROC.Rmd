@@ -264,6 +264,7 @@ sub60$Kolonne1 <- "19"
 
 
 bind <- rbind(sub, sub1, sub2, sub3, sub4, sub5, sub6, sub7, sub8, sub9, sub10, sub11, sub12, sub13, sub14, sub15, sub16, sub17, sub18, sub19, sub20, sub21, sub22, sub23, sub24, sub25, sub26, sub27, sub28, sub29, sub40, sub41, sub42, sub44, sub45, sub46, sub47, sub48, sub49, sub50, sub51, sub52, sub53, sub54, sub55, sub56, sub57, sub58, sub100, sub101, sub59, sub60)
+kommune  <- read.csv("Kommuneposition (1).csv", sep = ";") #Loading in file about danish municipalities
 
 bind$stationID <- as.numeric(bind$stationID)
 bind$humidity_past1h <-  as.numeric(bind$humidity_past1h)
@@ -383,8 +384,6 @@ write_csv(mobility_dat, "mobility_dat.csv") #Data is saved as 'mobility_dat.csv'
 ### Merging mobility data and weather data for each municipality
 
 ```{r Taking mean of weather variables per weather station in municipalities}
-kommune  <- read.csv("Kommuneposition (1).csv", sep = ";") 
-
 data1 <- full_join(data10, kommune, by = "Kommune", "Date")
 
 data1$Kolonne1 <- ifelse(is.na(data1$Kolonne1.x), data1$Kolonne1.y, data1$Kolonne1.x)
