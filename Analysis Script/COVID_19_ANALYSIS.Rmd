@@ -1,0 +1,549 @@
+---
+title: "The effect of social mobility dynamics on Covid-19"
+author: "Lasse Hyldig Hansen"
+date: "4/30/2021"
+output: html_document
+---
+
+```{r Loading Packages}
+#Install the required packages from github:
+install.packages("devtools")
+
+devtools::install_github("klmr/modules", force = T) # for  loading the functions i made for loading DMI data including their documentation
+
+install.packages("pacman")
+pacman::p_load(tidyverse, 
+               purrr, 
+               tidyr, 
+               stringr, 
+               Boruta, 
+               ggplot2
+               sandwich,
+               survival,
+               car,
+               ggpubr,
+               
+               )
+CM <- modules::import("COVID_MODEL_helpfuns", attach = T, doc = T) #Loading my own DMI module
+```
+
+### Loading DMI Weather Variables
+
+```{r Using function}
+data <- list.files(path = "/Users/lassehansen/Desktop/DMI", pattern = ".txt") %>%
+    purrr::map_df(CM$PreProc) #Using the module to load all DMI files (1 for each month) at a time
+
+write.csv(data, "DMI_DATA_CLEAN.csv") #Data is saved in the file called 'DMI_DATA_CLEAN.csv'
+```
+
+### Reading Google Mobility Data - Cleaning it to match Municipality names
+
+```{r Loading 2020 mobility data from google}
+mobility <- read_csv("2020_DK_Region_Mobility_Report1.csv")
+
+mobility$CountDate <- as.numeric(mobility$date)
+
+mobility$sub_region_2 <- gsub(" Municipality", "", mobility$sub_region_2)
+mobility$sub_region_2 <- gsub(" ", "", mobility$sub_region_2)
+
+mobility_region = mobility %>% filter(is.na(.$sub_region_2)) %>% filter(!is.na(.$sub_region_1)) %>% select(sub_region_1, date, 10:16)
+
+mobility$sub_region_2 <- ifelse(mobility$sub_region_2 == "Vesthimmerland", "Vesthimmerlands", mobility$sub_region_2)
+
+mobility$sub_region_2 <- ifelse(mobility$sub_region_2 == "Brondby", "Brøndby", mobility$sub_region_2)
+
+mobility$sub_region_2 <- ifelse(mobility$sub_region_2 == "Copenhagen", "København", mobility$sub_region_2)
+
+mobility$sub_region_2 <- ifelse(mobility$sub_region_2 == "Nordfyn", "Nordfyns", mobility$sub_region_2)
+
+mobility = mobility %>% filter(!is.na(sub_region_2))
+
+mobility <- mobility %>% select(date, sub_region_1, sub_region_2, residential_percent_change_from_baseline, workplaces_percent_change_from_baseline, transit_stations_percent_change_from_baseline, retail_and_recreation_percent_change_from_baseline, parks_percent_change_from_baseline, grocery_and_pharmacy_percent_change_from_baseline)
+
+colnames(mobility) <- c("Date", "Region", "Kommune", "Residential", "Workplace", "Transit", "Retail", "Park", "Grocery")
+```
+
+```{r Loading 2021 mobility data from google}
+mobility1 <- read_csv("2021_DK_Region_Mobility_Report.csv")
+
+mobility1$CountDate <- as.numeric(mobility1$date)
+
+mobility1$sub_region_2 <- gsub(" Municipality", "", mobility1$sub_region_2)
+mobility1$sub_region_2 <- gsub(" ", "", mobility1$sub_region_2)
+
+mobility_region2020 = mobility1 %>% filter(is.na(.$sub_region_2)) %>% filter(!is.na(.$sub_region_1)) %>% select(sub_region_1, date, 10:16)
+
+mobility1$sub_region_2 <- ifelse(mobility1$sub_region_2 == "Vesthimmerland", "Vesthimmerlands", mobility1$sub_region_2)
+
+mobility1$sub_region_2 <- ifelse(mobility1$sub_region_2 == "Brondby", "Brøndby", mobility1$sub_region_2)
+
+mobility1$sub_region_2 <- ifelse(mobility1$sub_region_2 == "Copenhagen", "København", mobility1$sub_region_2)
+
+mobility1$sub_region_2 <- ifelse(mobility1$sub_region_2 == "Nordfyn", "Nordfyns", mobility1$sub_region_2)
+
+mobility1 = mobility1 %>% filter(!is.na(sub_region_2))
+
+
+mobility1 <- mobility1 %>% select(date, sub_region_1, sub_region_2, residential_percent_change_from_baseline, workplaces_percent_change_from_baseline, transit_stations_percent_change_from_baseline, retail_and_recreation_percent_change_from_baseline, parks_percent_change_from_baseline, grocery_and_pharmacy_percent_change_from_baseline)
+
+colnames(mobility1) <- c("Date", "Region", "Kommune", "Residential", "Workplace", "Transit", "Retail", "Park", "Grocery")
+
+mobility2 <- rbind(mobility, mobility1)
+mobility20 <- rbind(mobility_region, mobility_region2020)
+mobility11 <- left_join(data9, mobility2, by = c("Kommune", "Date"))
+mobility20 = mobility20 %>% rename(Date = date)
+mobility20 = mobility20 %>% rename(Region = sub_region_1)
+```
+
+### Using Region Identifier function to replace data if necessary
+
+```{r}
+mobility11 <- CM$Region_identifier(mobility11)
+```
+
+### If municipality does not contain data for a date, replace with region mean for the day
+
+```{r Making sure every region has every date}
+join = left_join(mobility11, mobility20, by = c("Region", "Date"))
+
+join$Residential = ifelse(is.na(join$Residential), join$residential_percent_change_from_baseline, join$Residential)
+
+join$Transit = ifelse(is.na(join$Transit), join$transit_stations_percent_change_from_baseline, join$Transit)
+
+join$Retail = ifelse(is.na(join$Retail), join$retail_and_recreation_percent_change_from_baseline, join$Retail)
+
+join$Workplace = ifelse(is.na(join$Workplace), join$workplaces_percent_change_from_baseline, join$Workplace)
+
+mobility_dat = join %>% filter(.$Kommune != "Christiansø")
+mobility_dat = mobility_dat %>% filter(.$Kommune != "DMI")
+mobility_dat = mobility_dat %>% select(Date, Kommune, Region, Transit, Residential, Retail, Workplace)
+
+mobility_dat = mobility_dat %>% group_by(Date, Kommune) %>% 
+  summarise(
+    Transit = mean(Transit),
+    Residential = mean(Residential),
+    Retail = mean(Retail),
+    Workplace = mean(Workplace)
+  )
+  
+  
+write_csv(mobility_dat, "mobility_dat.csv") #Data is saved as 'mobility_dat.csv' for your use
+```
+
+### Merging mobility data and weather data for each municipality
+
+```{r Taking mean of weather variables per weather station in municipalities}
+kommune  <- read.csv("Kommuneposition (1).csv", sep = ";") 
+
+data1 <- full_join(data10, kommune, by = "Kommune", "Date")
+
+data1$Kolonne1 <- ifelse(is.na(data1$Kolonne1.x), data1$Kolonne1.y, data1$Kolonne1.x)
+data1$Kolonne1.y <- NULL
+data1$Kolonne1.x <- NULL
+
+data1 <- filter(data1, Kommune != "DMI") # Filtering out two datapoints that we do not need for analysis
+data1 <- filter(data1, Kommune != "Christiansø")
+data4 <- data1 %>% 
+  select(Date, Kommune, humidity_past1h, precip_dur_past1h, sun_last1h_glob, temp_mean_past1h, Kolonne1, wind_speed_past1h) %>% 
+  group_by(Kolonne1, Date) %>% 
+  summarise(
+    Humid = mean(humidity_past1h, na.rm = T),
+    Precip = mean(precip_dur_past1h, na.rm = T),
+    Sun = mean(sun_last1h_glob, na.rm = T),
+    Temp = mean(temp_mean_past1h, na.rm = T),
+    Wind = mean(wind_speed_past1h, na.rm = T),
+    Kommune = Kommune
+            )
+
+data4 <- data4 %>% 
+  group_by(Date, Kommune) %>% 
+  summarise(
+    Humid = mean(Humid, na.rm = T),
+    Precip = mean(Precip, na.rm = T),
+    Sun = mean(Sun, na.rm = T),
+    Temp = mean(Temp, na.rm = T),
+    Wind = mean(Wind, na.rm = T),
+            )
+
+
+data4 <- left_join(mobility_dat1, data4, by = c("Kommune" = "Kommune", "Date" = "Date"))
+
+data4 <- filter(data4, Kommune != "DMI")
+```
+
+
+### Loading Municipality time series of cases from SSI
+
+```{r}
+
+positive <- read.csv("Municipality_cases_time_series.csv", sep = ";")
+positive$NA. <- NULL
+
+positive <- positive[complete.cases(positive), ]
+positive <- positive %>% pivot_longer(., 2:99)
+colnames(positive) <- c("Date", "Kommune", "Cases")
+
+positive$Kommune <- ifelse(positive$Kommune == "Copenhagen", "København",
+                  ifelse(positive$Kommune == "Høje.Taastrup", "Høje-Taastrup",
+                  ifelse(positive$Kommune == "Lyngby.Taarbæk", "Lyngby-Taarbæk",
+                  ifelse(positive$Kommune == "Faaborg.Midtfyn", "Faaborg-Midtfyn",
+                  ifelse(positive$Kommune == "Ikast.Brande", "Ikast-Brande",
+                  ifelse(positive$Kommune == "Ringkøbing.Skjern", "Ringkøbing-Skjern",
+                  ifelse(positive$Kommune == "Copenhagen", "København", positive$Kommune
+                         )))))))
+
+positive <- filter(positive, Kommune != "DMI")
+
+
+positive$Date <- as.Date(positive$Date)
+
+data5 <- left_join(data4, positive)
+```
+
+### Loading Oxford Stringency Index
+
+```{r Reading in stringency index}
+string <- read_csv("covid-stringency-index (1).csv")
+string = string %>% filter(., Entity == "Denmark")
+string$Date <- as.Date(string$Day)
+string$Entity <- NULL
+string$Code <- NULL
+```
+
+### Moving onto loading data from DKSTAT
+
+```{r Getting devtools for dkstat}
+if(!require("devtools")) install.packages("devtools")
+
+library("devtools")
+
+install_github("rOpenGov/dkstat", force =TRUE )
+
+library(dkstat)
+
+table<- dst_get_tables(lang = "da")
+aulaar_meta <- dst_meta(table = "AREALDK", lang = "da")
+```
+
+#### Loading builded areas variable
+
+```{r}
+Befolk <- dst_get_data(table = "AREALDK", ARE1 = "Bygninger og bebyggede områder" , ENHED = "Kvadratmeter (m2) pr. indbygger",  OMRÅDE = "*", Tid = "2018")
+Befolk$Kommune = Befolk$OMRÅDE
+Befolk$Bebyggelse = Befolk$value
+Befolk = Befolk %>% select(Kommune, Bebyggelse)
+```
+
+#### Loading Number of Young Adults
+
+```{r Getting age characteristics}
+city <- dst_get_data(table = "BY2" , KOMK = "*", ALDER = "*", KØN = "*", Tid = "2020")
+city$ALDER <- gsub("år", "", city$ALDER)
+
+colnames(city) <- c("Kommune", "Alder", "Køn", "Date", "Antal_Gruppe")
+
+city$Alder <- as.numeric(city$Alder)
+
+city <- subset(city, Alder <= 100)
+
+city <- subset(city, Kommune != "Christiansø")
+
+city1 <- city %>% 
+     mutate(Alder = ifelse(Alder >= 19 & Alder < 30, "Under_30",
+                      ifelse(Alder >= 30 & Alder < 110, "Over_30", "h"))) %>% 
+     group_by(Kommune, Alder) %>% 
+     summarise(
+       Antal = sum(Antal_Gruppe)
+     )       
+                           
+
+city <- city1 %>% group_by(Kommune, Alder) %>% 
+     pivot_wider(., 1:3, names_from = Alder, values_from = Antal) 
+
+city <- city %>% mutate(
+       Total = Under_30 + Over_30 + h,
+       Under_30 = (Under_30/Total)*100,
+       Over_30 = (Over_30/Total)*100)
+```
+
+### Reading Municipality Population Number
+
+```{r}
+BY3 <- read_csv("BY3.csv") #Avaliable in materials
+```
+
+#### Making lagged variables for analysis 
+
+```{r}
+data7 <- data5 %>% group_by(Kommune) %>% mutate(
+  Humid_lag = lag(Humid, 9),
+  Temp_lag = lag(Temp, 9),
+  Precip_lag = lag(Precip, 9),
+  Cases_lag9 = lag(Cases, 9),
+  Retail_Change_lag = lag(Retail, 9),
+  Transit_Change_lag = lag(Transit, 9), 
+  Residential_Change_lag = lag(Residential, 9),
+  Workplace_Change_lag = lag(Workplace, 9)
+  )
+```
+
+### Joining all variables for analysis
+
+```{r Joining it all for the analysis}
+
+join1 <- full_join(BY3, city, by = c("Kommune"))
+join2 <- left_join(join1, Befolk, by = "Kommune")
+
+d7 <- left_join(data7, string, by = "Date")
+d8 <- full_join(d7, join2, by = c("Kommune"))
+d7 = d8
+d8$Week <- strftime(d8$Date, format = "%Y-W%V")
+d8$CountDate <- as.Date(d8$Date, format= "%Y-%m-%d")
+d8 = d8 %>% subset(Kommune != "Christiansø")
+
+```
+
+### Making lagged variables, rolling averages, filtering dates, and scaling data
+
+```{r}
+d9 = d8 %>% ungroup() %>% mutate(
+  Stringency = lag(stringency_index, 9),
+  Cases = ((100000/Befolkningstal)*Cases),
+  Cases_lag9 = ((100000/Befolkningstal)*Cases_lag9),
+  Cases_lag9 = movavg(Cases_lag9, n = 7, type = "s"),
+  Precip_lag= movavg(Precip_lag, n = 7, type = "s"),
+  Temp_lag= movavg(Temp_lag, n = 7, type = "s"),
+  Humid_lag= movavg(Humid_lag, n = 7, type = "s"),
+  Transit_Change_lag= movavg(Transit_Change_lag, n = 7, type = "s"),
+  Work_Change_lag= movavg(Workplace_Change_lag, n = 7, type = "s"),
+  Retail_Change_lag= movavg(Retail_Change_lag, n = 7, type = "s"),
+  Residential_Change_lag= movavg(Residential_Change_lag, n = 7, type = "s"),
+  Cases = movavg(Cases, n = 7, type = "s"),
+) %>% select(Cases_lag9 , Stringency, Bebyggelse, Over_30 , Transit_Change_lag , Residential_Change_lag, Kommune, Date, Week, Under_30, Cases, Temp_lag, Precip_lag, Work_Change_lag, Retail_Change_lag, Befolkningstæthed)
+
+d9 = d9 %>%  subset(.$Date >= "2020-09-01" & .$Date <= "2021-02-28") #Subsetting the dates needed for analysis
+
+d9$Stringency = scale(d9$Stringency)
+d9$Cases_lag9 = scale(d9$Cases_lag9)
+d9$Precip_lag = scale(d9$Precip_lag)
+d9$Temp_lag = scale(d9$Temp_lag)
+d9$Transit_Change_lag = scale(d9$Transit_Change_lag)
+d9$Work_Change_lag = scale(d9$Work_Change_lag)
+d9$Retail_Change_lag = scale(d9$Retail_Change_lag)
+d9$Residential_Change_lag = scale(d9$Residential_Change_lag)
+d9$Under_30 = scale(d9$Under_30)
+d9$Befolkningstæthed = scale(d9$Befolkningstæthed)
+d9$Bebyggelse = scale(d9$Bebyggelse)
+
+d10 = d9 %>% drop_na()
+
+mean(d9$Stringency)
+```
+
+### Running the two models (Null and Full model)
+
+```{r}
+reg1 <- lmer(data = d10, Cases ~ (Cases_lag9  +  Residential_Change_lag + Transit_Change_lag + Precip_lag + Temp_lag)*Stringency + Befolkningstæthed + Under_30 + (1|Date) + (1 | Kommune))
+reg2 <- lm(data = d10, Cases ~ Cases_lag9 * Stringency)
+```
+
+### Getting Marginal and Conditional Rsquared
+
+```{r}
+MuMIn::r.squaredGLMM(reg2)
+```
+
+### Getting Summary Statistics
+
+```{r}
+summary(reg1)
+summary(reg2)
+```
+
+### Model Comparison
+
+```{r}
+anova(reg1, reg2)
+```
+
+### Making Interaction plots
+
+```{r}
+Inter.HandPick1 <- effect('Temp_lag:Stringency', reg1, 
+                                              xlevels=list(Temp_lag = c(-1, 0, 1),
+                                              Stringency = c(-1, 0, 1)),
+                                              se=TRUE, confidence.level=.95, typical=mean)
+
+Inter.HandPick1 = data.frame(Inter.HandPick1)
+
+Inter.HandPick1$Stringency = ifelse(Inter.HandPick1$Stringency == -1, "Low Stringency", 
+                            ifelse(Inter.HandPick1$Stringency == 0, "Mean Stringency", "High Stringency"))
+
+Inter.HandPick1$Temp_lag = ifelse(Inter.HandPick1$Temp_lag == -1, "Low Temperature", 
+                            ifelse(Inter.HandPick1$Temp_lag == 0, "Mean Temperature", "High Temperature"))
+
+Inter.HandPick1$Temp_lag <- factor(Inter.HandPick1$Temp_lag, levels = c("Low Temperature", "Mean Temperature", "High Temperature"))
+Inter.HandPick1$Stringency <- factor(Inter.HandPick1$Stringency, levels = c("Low Stringency", "Mean Stringency", "High Stringency"))
+geom.text.size = 8
+theme.size = (14/5) * geom.text.size
+
+p1<- ggplot(Inter.HandPick1, aes(x=Temp_lag, y=fit, group=Stringency, color=Stringency)) + 
+  geom_line() +
+  geom_point()+
+  geom_errorbar(aes(ymin=fit-se, ymax=fit+se), width=.1,
+                 ) + scale_color_manual(values=c('#ffd882','#c4c4c4', '#15607a')) +
+  labs("Interaction effect of Stringency and Temperature", x="", y = "Cases per 100,000 capita") + theme(axis.text = element_text(size = theme.size)) + theme_light()
+```
+
+```{r Plot Cases interaction}
+Inter.HandPick2 <- effect('Cases_lag9:Stringency', reg1, 
+                                              xlevels=list(Cases_lag9 = c(-1, 0, 1),
+                                              Stringency = c(-1, 0, 1)),
+                                              se=TRUE, confidence.level=.95, typical=mean)
+Inter.HandPick2 = data.frame(Inter.HandPick2)
+
+Inter.HandPick2$Stringency = ifelse(Inter.HandPick2$Stringency == -1, "Low Stringency", 
+                            ifelse(Inter.HandPick2$Stringency == 0, "Mean Stringency", "High Stringency"))
+
+Inter.HandPick2$Cases_lag9 = ifelse(Inter.HandPick2$Cases_lag9 == -1, "Low number of Cases", 
+                            ifelse(Inter.HandPick2$Cases_lag9 == 0, "Mean number of Cases", "High number of Cases"))
+
+Inter.HandPick2$Cases_lag9 <- factor(Inter.HandPick2$Cases_lag9, levels = c("Low number of Cases", "Mean number of Cases", "High number of Cases"))
+Inter.HandPick2$Stringency <- factor(Inter.HandPick2$Stringency, levels = c("Low Stringency", "Mean Stringency", "High Stringency"))
+
+
+p2<- ggplot(Inter.HandPick2, aes(x=Cases_lag9, y=fit, group=Stringency, color=Stringency)) + 
+  geom_line() +
+  geom_point()+
+  geom_errorbar(aes(ymin=fit-se, ymax=fit+se), width=.1,
+                 ) + scale_color_manual(values=c('#ffd882','#c4c4c4', '#15607a')) +
+  labs("Interaction effect of Stringency and autoregresive Cases", x="", y = "Cases per 100,000 capita") + theme(axis.text = element_text(size = theme.size))+ theme_light()
+```
+
+
+```{r}
+Inter.HandPick3 <- effect('Precip_lag:Stringency', reg1, 
+                                              xlevels=list(Precip_lag = c(-1, 0, 1),
+                                              Stringency = c(-1, 0, 1)),
+                                              se=TRUE, confidence.level=.95, typical=mean)
+Inter.HandPick3 = data.frame(Inter.HandPick3)
+
+Inter.HandPick3$Stringency = ifelse(Inter.HandPick3$Stringency == -1, "Low Stringency", 
+                            ifelse(Inter.HandPick3$Stringency == 0, "Mean Stringency", "High Stringency"))
+
+Inter.HandPick3$Precip_lag = ifelse(Inter.HandPick3$Precip_lag == -1, "Low Precipitation", 
+                            ifelse(Inter.HandPick3$Precip_lag == 0, "Mean Precipitation", "High Precipitation"))
+
+Inter.HandPick3$Precip_lag <- factor(Inter.HandPick3$Precip_lag, levels = c("Low Precipitation", "Mean Precipitation", "High Precipitation"))
+Inter.HandPick3$Stringency <- factor(Inter.HandPick3$Stringency, levels = c("Low Stringency", "Mean Stringency", "High Stringency"))
+
+
+p3<- ggplot(Inter.HandPick3, aes(x=Precip_lag, y=fit, group=Stringency, color=Stringency)) + 
+  geom_line() +
+  geom_point()+
+  geom_errorbar(aes(ymin=fit-se, ymax=fit+se), width=.1,
+                 ) + scale_color_manual(values=c('#ffd882','#c4c4c4', '#15607a')) +
+  labs("Interaction effect of Stringency and Precipitation", x="", y = "Cases per 100,000 capita") + theme(axis.text = element_text(size = theme.size))+ theme_light()
+```
+
+```{r}
+
+Inter.HandPick4 <- effect('Residential_Change_lag:Stringency', reg1, 
+                                              xlevels=list(Residential_Change_lag = c(-1, 0, 1),
+                                              Stringency = c(-1, 0, 1)),
+                                              se=TRUE, confidence.level=.95, typical=mean)
+Inter.HandPick4 = data.frame(Inter.HandPick4)
+
+Inter.HandPick4$Stringency = ifelse(Inter.HandPick4$Stringency == -1, "Low Stringency", 
+                            ifelse(Inter.HandPick4$Stringency == 0, "Mean Stringency", "High Stringency"))
+
+Inter.HandPick4$Residential_Change_lag = ifelse(Inter.HandPick4$Residential_Change_lag == -1, "Low Residential Mobility", 
+                            ifelse(Inter.HandPick4$Residential_Change_lag == 0, "Mean Residential Mobility", "High Residential Mobility"))
+
+Inter.HandPick4$Residential_Change_lag <- factor(Inter.HandPick4$Residential_Change_lag, levels = c("Low Residential Mobility", "Mean Residential Mobility", "High Residential Mobility"))
+Inter.HandPick4$Stringency <- factor(Inter.HandPick4$Stringency, levels = c("Low Stringency", "Mean Stringency", "High Stringency"))
+
+
+p4<- ggplot(Inter.HandPick4, aes(x=Residential_Change_lag, y=fit, group=Stringency, color=Stringency)) + 
+  geom_line() +
+  geom_point()+
+  geom_errorbar(aes(ymin=fit-se, ymax=fit+se), width=.1,
+                 ) + scale_color_manual(values=c('#ffd882','#c4c4c4', '#15607a')) +
+  labs("Interaction effect of Stringency and Residential Mobility Change", x="", y = "Cases per 100,000 capita")+ theme(axis.text = element_text(size = theme.size))+theme_light()
+```
+
+```{r}
+Inter.HandPick5 <- effect('Transit_Change_lag:Stringency', reg1, 
+                                              xlevels=list(Transit_Change_lag = c(-1, 0, 1),
+                                              Stringency = c(-1, 0, 1)),
+                                              se=TRUE, confidence.level=.95, typical=mean)
+Inter.HandPick5 = data.frame(Inter.HandPick5)
+
+Inter.HandPick5$Stringency = ifelse(Inter.HandPick5$Stringency == -1, "Low Stringency", 
+                            ifelse(Inter.HandPick5$Stringency == 0, "Mean Stringency", "High Stringency"))
+
+Inter.HandPick5$Transit_Change_lag = ifelse(Inter.HandPick5$Transit_Change_lag == -1, "Low Transit Mobility", 
+                            ifelse(Inter.HandPick5$Transit_Change_lag == 0, "Mean Transit Mobility", "High Transit Mobility"))
+
+Inter.HandPick5$Transit_Change_lag <- factor(Inter.HandPick5$Transit_Change_lag, levels = c("Low Transit Mobility", "Mean Transit Mobility", "High Transit Mobility"))
+Inter.HandPick5$Stringency <- factor(Inter.HandPick5$Stringency, levels = c("Low Stringency", "Mean Stringency", "High Stringency"))
+
+
+p5<- ggplot(Inter.HandPick5, aes(x=Transit_Change_lag, y=fit, group=Stringency, color=Stringency)) + 
+  geom_line() +
+  geom_point()+
+  geom_errorbar(aes(ymin=fit-se, ymax=fit+se), width=.1,
+                 ) + scale_color_manual(values=c('#ffd882','#c4c4c4', '#15607a')) +
+  labs("Interaction effect of Stringency and Transit Mobility Change", x="", y = "Cases per 100,000 capita") + theme(axis.text = element_text(size = theme.size))+ theme_light()
+```
+
+### Two figures from Paper
+
+```{r}
+figure1 = ggarrange(p1, p4,labels = c("a","b"), ncol = 2, nrow = 1, common.legend = T) + theme(axis.text = element_text(size = theme.size))+ theme_light()
+figure1
+```
+
+
+```{r}
+figure2 = ggarrange(p2,p3, p5, labels = c("a","b", "c"), ncol = 2, nrow = 2, common.legend = T) + theme(axis.text = element_text(size = theme.size))+ theme_light()
+figure2
+```
+
+
+### Getting predicted values from the two models
+
+```{r}
+d10$Full_Model <- fitted(reg1, d10)
+d10$Null_Model <- fitted(reg2, d10)
+```
+
+### Making dataframe for visualizing some random municipalities for visuals from paper
+
+```{r}
+d11 = d10 %>% filter(.$Kommune %in% c("Sønderborg", "Varde", "Brøndby", "København"))
+```
+
+### Plotting fitted values from both models compared to actual cases for the four aforementioned municipalities 
+
+```{r}
+fitted_plot = ggplot(data = d11, aes(Date, )) +
+  geom_smooth(aes(y = Cases, colour = "Cases",level = 0.95)) +
+  geom_smooth(aes(y = Model1, colour = "Model1", level = 0.95)) +
+  geom_smooth(aes(y = Model2, colour = "Model2", level = 0.95)) +
+  facet_wrap(~ Kommune) +
+  theme(axis.text = element_text(size = theme.size))+ theme_light()
+fitted_plot
+```
+
+### Plotting fitted values from both models compared to actual cases for all municipalities
+
+```{r}
+fitted_plot_all = ggplot(data = d10, aes(Date, )) +
+  geom_smooth(aes(y = Cases, colour = "Cases",level = 0.95)) +
+  geom_smooth(aes(y = Model1, colour = "Model1", level = 0.95)) +
+  geom_smooth(aes(y = Model2, colour = "Model2", level = 0.95)) +
+  facet_wrap(~ Kommune) +
+  theme(axis.text = element_text(size = theme.size))+ theme_light()
+fitted_plot_all
+```
